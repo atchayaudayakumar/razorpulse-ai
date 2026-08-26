@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+pydantic
+sqlalchemy
+python-dotenv
+
+google-genai
+
+razorpay
+
+streamlit
+plotly
+pandas
+
+pytest
+httpx
