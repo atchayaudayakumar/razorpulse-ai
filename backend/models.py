@@ -24,6 +24,12 @@ class Invoice(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     invoice_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    razorpay_order_id: Mapped[str | None] = mapped_column(
+    String(200),
+    unique=True,
+    nullable=True,
+    index=True,
+)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"))
     amount: Mapped[float] = mapped_column(Float)
     currency: Mapped[str] = mapped_column(String(10), default="INR")

@@ -1,3 +1,8 @@
+from backend.database import Base, engine, SessionLocal
+from backend.models import Invoice
+from backend.payment_service import record_payment_attempt
+from backend.risk_service import calculate_payment_risk
+from backend.recovery_service import create_ai_recovery_attempt
 import hmac
 import hashlib
 
@@ -39,7 +44,6 @@ def health():
         "status": "healthy",
     }
 
-
 @app.post("/webhooks/razorpay")
 async def razorpay_webhook(
     request: Request,
@@ -74,6 +78,81 @@ async def razorpay_webhook(
             detail="Invalid webhook signature.",
         )
 
-    return {
-        "status": "received",
-    }
+    payload = await request.json()
+
+    if payload.get("event") != "payment.failed":
+        return {
+            "status": "ignored",
+            "reason": "Unsupported event.",
+        }
+
+    payment_entity = (
+        payload
+        .get("payload", {})
+        .get("payment", {})
+        .get("entity", {})
+    )
+
+    razorpay_payment_id = payment_entity.get("id")
+    razorpay_order_id = payment_entity.get("order_id")
+    status = payment_entity.get("status", "")
+    error_description = payment_entity.get(
+        "error_description",
+        "",
+    )
+
+    if not razorpay_payment_id or not razorpay_order_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Payment ID or order ID is missing.",
+        )
+
+    db = SessionLocal()
+
+    try:
+        invoice = (
+            db.query(Invoice)
+            .filter(
+                Invoice.razorpay_order_id
+                == razorpay_order_id
+            )
+            .first()
+        )
+
+        if invoice is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Invoice for Razorpay order not found.",
+            )
+
+        payment_attempt = record_payment_attempt(
+            db=db,
+            invoice_id=invoice.id,
+            status=status,
+            razorpay_payment_id=razorpay_payment_id,
+            failure_reason=error_description,
+        )
+
+        risk = calculate_payment_risk(
+            db=db,
+            payment_attempt=payment_attempt,
+        )
+
+        recovery = create_ai_recovery_attempt(
+            db=db,
+            payment_attempt=payment_attempt,
+        )
+
+        return {
+            "status": "processed",
+            "payment_id": razorpay_payment_id,
+            "invoice_id": invoice.id,
+            "risk_level": risk.risk_level,
+            "risk_score": risk.risk_score,
+            "revenue_at_risk": risk.revenue_at_risk,
+            "recovery_strategy": recovery.strategy,
+        }
+
+    finally:
+        db.close()
+   
