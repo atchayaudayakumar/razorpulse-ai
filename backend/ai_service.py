@@ -29,8 +29,7 @@ def analyze_payment_failure(
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY is not configured.")
 
-    client = genai.Client(api_key="AQ.Ab8RN6I7y71igKQuLVbYf6rZBb8NMcEI5x06-RPK1nKMixYTQg")
-
+    client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = f"""
 You are the AI analysis component of RazorPulse,
 an AI-assisted revenue recovery system.
