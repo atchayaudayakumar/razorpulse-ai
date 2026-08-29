@@ -11,6 +11,7 @@ from backend.config import (
 )
 from backend.database import Base, SessionLocal, engine
 from backend.models import (
+    AuditLog,
     Invoice,
     PaymentAttempt,
     RecoveryAttempt,
@@ -247,5 +248,42 @@ def get_risk_analysis():
 
         return results
 
+
     finally:
         db.close()
+
+
+
+# ---------------------------------------------------------
+# Audit Trail API
+# ---------------------------------------------------------
+
+@app.get("/api/audit-logs")
+def get_audit_logs():
+    """
+    Return audit logs ordered from newest to oldest.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        logs = (
+            db.query(AuditLog)
+            .order_by(AuditLog.created_at.desc())
+            .all()
+        )
+
+        return [
+            {
+                "id": log.id,
+                "event_type": log.event_type,
+                "entity_type": log.entity_type,
+                "entity_id": log.entity_id,
+                "message": log.message,
+                "created_at": log.created_at,
+            }
+            for log in logs
+        ]
+
+    finally:
+         db.close()
