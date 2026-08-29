@@ -1,20 +1,21 @@
-from backend.database import Base, engine, SessionLocal
-from backend.models import Invoice
-from backend.payment_service import record_payment_attempt
-from backend.risk_service import calculate_payment_risk
-from backend.recovery_service import create_ai_recovery_attempt
-import hmac
 import hashlib
+import hmac
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from sqlalchemy.orm import Session
 
 from backend.config import (
-    APP_NAME,
     APP_ENV,
+    APP_NAME,
     RAZORPAY_WEBHOOK_SECRET,
 )
-from backend.database import Base, engine
-from backend import models
+from backend.database import Base, SessionLocal, engine
+from backend.models import (
+    Invoice,
+    PaymentAttempt,
+    RecoveryAttempt,
+)
+from backend.risk_service import calculate_payment_risk
 
 
 # Create all database tables defined in models.py
@@ -29,6 +30,10 @@ app = FastAPI(
 )
 
 
+# ---------------------------------------------------------
+# Root
+# ---------------------------------------------------------
+
 @app.get("/")
 def root():
     return {
@@ -38,12 +43,20 @@ def root():
     }
 
 
+# ---------------------------------------------------------
+# Health
+# ---------------------------------------------------------
+
 @app.get("/health")
 def health():
     return {
         "status": "healthy",
     }
 
+
+# ---------------------------------------------------------
+# Razorpay Webhook
+# ---------------------------------------------------------
 @app.post("/webhooks/razorpay")
 async def razorpay_webhook(
     request: Request,
@@ -51,8 +64,6 @@ async def razorpay_webhook(
 ):
     """
     Receive and verify Razorpay webhook events.
-
-    Razorpay signs the raw request body using the webhook secret.
     """
 
     body = await request.body()
@@ -80,12 +91,6 @@ async def razorpay_webhook(
 
     payload = await request.json()
 
-    if payload.get("event") != "payment.failed":
-        return {
-            "status": "ignored",
-            "reason": "Unsupported event.",
-        }
-
     payment_entity = (
         payload
         .get("payload", {})
@@ -93,19 +98,8 @@ async def razorpay_webhook(
         .get("entity", {})
     )
 
-    razorpay_payment_id = payment_entity.get("id")
-    razorpay_order_id = payment_entity.get("order_id")
-    status = payment_entity.get("status", "")
-    error_description = payment_entity.get(
-        "error_description",
-        "",
-    )
-
-    if not razorpay_payment_id or not razorpay_order_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Payment ID or order ID is missing.",
-        )
+    payment_id = payment_entity.get("id")
+    order_id = payment_entity.get("order_id")
 
     db = SessionLocal()
 
@@ -113,8 +107,7 @@ async def razorpay_webhook(
         invoice = (
             db.query(Invoice)
             .filter(
-                Invoice.razorpay_order_id
-                == razorpay_order_id
+                Invoice.razorpay_order_id == order_id
             )
             .first()
         )
@@ -122,37 +115,137 @@ async def razorpay_webhook(
         if invoice is None:
             raise HTTPException(
                 status_code=404,
-                detail="Invoice for Razorpay order not found.",
+                detail="Invoice not found for Razorpay order.",
             )
-
-        payment_attempt = record_payment_attempt(
-            db=db,
-            invoice_id=invoice.id,
-            status=status,
-            razorpay_payment_id=razorpay_payment_id,
-            failure_reason=error_description,
-        )
-
-        risk = calculate_payment_risk(
-            db=db,
-            payment_attempt=payment_attempt,
-        )
-
-        recovery = create_ai_recovery_attempt(
-            db=db,
-            payment_attempt=payment_attempt,
-        )
 
         return {
             "status": "processed",
-            "payment_id": razorpay_payment_id,
+            "payment_id": payment_id,
             "invoice_id": invoice.id,
-            "risk_level": risk.risk_level,
-            "risk_score": risk.risk_score,
-            "revenue_at_risk": risk.revenue_at_risk,
-            "recovery_strategy": recovery.strategy,
         }
 
     finally:
         db.close()
-   
+# ---------------------------------------------------------
+# Failed Payments API
+# ---------------------------------------------------------
+
+@app.get("/api/failed-payments")
+def get_failed_payments():
+    """
+    Return failed payment attempts from the database.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        payments = (
+            db.query(PaymentAttempt)
+            .filter(PaymentAttempt.status == "failed")
+            .order_by(PaymentAttempt.attempted_at.desc())
+            .all()
+        )
+
+        results = []
+
+        for payment in payments:
+            results.append(
+                {
+                    "payment_id": payment.razorpay_payment_id,
+                    "invoice_id": payment.invoice_id,
+                    "status": payment.status,
+                    "failure_reason": payment.failure_reason,
+                    "attempted_at": payment.attempted_at,
+                }
+            )
+
+        return results
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------
+# Recovery Attempts API
+# ---------------------------------------------------------
+
+@app.get("/api/recovery-attempts")
+def get_recovery_attempts():
+    """
+    Return recovery attempts together with invoice information.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        attempts = (
+            db.query(RecoveryAttempt, Invoice)
+            .join(
+                Invoice,
+                RecoveryAttempt.invoice_id == Invoice.id,
+            )
+            .order_by(RecoveryAttempt.id.desc())
+            .all()
+        )
+
+        return [
+            {
+                "recovery_id": recovery.id,
+                "invoice_id": invoice.invoice_id,
+                "amount": invoice.amount,
+                "currency": invoice.currency,
+                "strategy": recovery.strategy,
+                "status": recovery.status,
+                "amount_recovered": recovery.amount_recovered,
+                "notes": recovery.notes,
+            }
+            for recovery, invoice in attempts
+        ]
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------
+# Risk Analysis API
+# ---------------------------------------------------------
+
+@app.get("/api/risk-analysis")
+def get_risk_analysis():
+    """
+    Calculate revenue risk for every payment attempt
+    using the existing risk service and risk engine.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        payments = (
+            db.query(PaymentAttempt)
+            .order_by(PaymentAttempt.attempted_at.desc())
+            .all()
+        )
+
+        results = []
+
+        for payment in payments:
+            risk = calculate_payment_risk(
+                db,
+                payment,
+            )
+
+            results.append(
+                {
+                    "payment_id": payment.razorpay_payment_id,
+                    "invoice_id": payment.invoice_id,
+                    "risk_score": risk.risk_score,
+                    "risk_level": risk.risk_level,
+                    "revenue_at_risk": risk.revenue_at_risk,
+                    "reason": risk.reason,
+                }
+            )
+
+        return results
+
+    finally:
+        db.close()
