@@ -9,6 +9,24 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+BACKEND_URL = "http://127.0.0.1:8000"
+
+
+def get_api_data(endpoint):
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}{endpoint}",
+            timeout=5,
+        )
+
+        if response.status_code == 200:
+            return response.json()
+
+        return []
+
+    except requests.exceptions.RequestException:
+        return []
+
 # ---------- Styling ----------
 st.markdown(
     """
@@ -319,7 +337,7 @@ elif page == "Risk Analysis":
 
     try:
         response = requests.get(
-            "http://127.0.0.1:8000/api/risk-analysis",
+            f"{BACKEND_URL}/api/risk-analysis",
             timeout=5,
         )
 
@@ -462,7 +480,7 @@ elif page == "Audit Trail":
 
     try:
         response = requests.get(
-            "http://127.0.0.1:8000/api/audit-logs",
+            f"{BACKEND_URL}/api/audit-logs",
             timeout=5,
         )
 
