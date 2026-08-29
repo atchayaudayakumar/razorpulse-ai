@@ -165,3 +165,55 @@ def create_ai_recovery_attempt(
     )
 
     return recovery_attempt
+def record_recovery_outcome(
+    db: Session,
+    recovery_attempt: RecoveryAttempt,
+    status: str,
+    amount_recovered: float,
+    notes: str = "",
+) -> RecoveryAttempt:
+    """
+    Record the outcome of an existing recovery attempt.
+    """
+
+    allowed_statuses = {
+        "completed",
+        "failed",
+        "manual_review",
+    }
+
+    if status not in allowed_statuses:
+        raise ValueError(
+            f"Invalid recovery status: {status}"
+        )
+
+    if amount_recovered < 0:
+        raise ValueError(
+            "amount_recovered cannot be negative."
+        )
+
+    recovery_attempt.status = status
+    recovery_attempt.amount_recovered = amount_recovered
+
+    if notes:
+        recovery_attempt.notes = (
+            f"{recovery_attempt.notes} "
+            f"Outcome: {notes}"
+        )
+
+    db.commit()
+    db.refresh(recovery_attempt)
+
+    create_audit_log(
+        db=db,
+        event_type="RECOVERY_OUTCOME",
+        entity_type="invoice",
+        entity_id=str(recovery_attempt.invoice_id),
+        message=(
+            f"Recovery outcome: {status}. "
+            f"Amount recovered: ₹{amount_recovered:.2f}. "
+            f"Notes: {notes}"
+        ),
+    )
+
+    return recovery_attempt

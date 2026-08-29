@@ -7,7 +7,10 @@ from backend.models import (
     Invoice,
     PaymentAttempt,
 )
-from backend.recovery_service import create_recovery_attempt
+from backend.recovery_service import (
+    create_recovery_attempt,
+    record_recovery_outcome,
+)
 
 from tests.test_database_config import (
     TestSessionLocal,
@@ -87,6 +90,79 @@ def test_create_recovery_attempt_from_failed_payment():
         assert audit is not None
         assert audit.entity_type == "invoice"
         assert "PAYMENT_EXTENSION" in audit.message
+
+    finally:
+        db.close()
+def test_record_recovery_outcome():
+    # Start with a clean test database.
+    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine)
+
+    db = TestSessionLocal()
+
+    try:
+        customer = Customer(
+            customer_id="OUTCOME-TEST-CUST-001",
+            name="Outcome Test Customer",
+            email="outcome-test@example.com",
+        )
+
+        db.add(customer)
+        db.commit()
+        db.refresh(customer)
+
+        invoice = Invoice(
+            invoice_id="OUTCOME-TEST-INV-001",
+            customer_id=customer.id,
+            amount=10000.0,
+            currency="INR",
+            status="pending",
+            due_date=datetime.utcnow(),
+        )
+
+        db.add(invoice)
+        db.commit()
+        db.refresh(invoice)
+
+        payment = PaymentAttempt(
+            invoice_id=invoice.id,
+            razorpay_payment_id="pay_outcome_test_001",
+            status="failed",
+            failure_reason="insufficient_funds",
+        )
+
+        db.add(payment)
+        db.commit()
+        db.refresh(payment)
+
+        recovery = create_recovery_attempt(
+            db=db,
+            payment_attempt=payment,
+        )
+
+        updated = record_recovery_outcome(
+            db=db,
+            recovery_attempt=recovery,
+            status="completed",
+            amount_recovered=10000.0,
+            notes="Demo recovery succeeded.",
+        )
+
+        assert updated.status == "completed"
+        assert updated.amount_recovered == 10000.0
+        assert "Demo recovery succeeded." in updated.notes
+
+        audit = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.entity_id == str(invoice.id),
+                AuditLog.event_type == "RECOVERY_OUTCOME",
+            )
+            .first()
+        )
+
+        assert audit is not None
+        assert "10000.00" in audit.message
 
     finally:
         db.close()
