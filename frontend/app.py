@@ -228,6 +228,13 @@ if page == "Overview":
         unsafe_allow_html=True,
     )
 
+    gross_revenue_at_risk = revenue_at_risk
+
+    outstanding_revenue_risk = max(
+        gross_revenue_at_risk - amount_recovered,
+        0,
+    )
+
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
@@ -235,10 +242,10 @@ if page == "Overview":
             f"""
             <div class="card">
                 <div class="card-label">
-                    Revenue at Risk
+                    Gross Revenue at Risk
                 </div>
                 <div class="card-value">
-                    ₹{revenue_at_risk:,.2f}
+                    ₹{gross_revenue_at_risk:,.2f}
                 </div>
             </div>
             """,
@@ -250,10 +257,10 @@ if page == "Overview":
             f"""
             <div class="card">
                 <div class="card-label">
-                    Failed Payments
+                    Outstanding Revenue Risk
                 </div>
                 <div class="card-value">
-                    {failed_count}
+                    ₹{outstanding_revenue_risk:,.2f}
                 </div>
             </div>
             """,
@@ -265,10 +272,10 @@ if page == "Overview":
             f"""
             <div class="card">
                 <div class="card-label">
-                    High-Risk Payments
+                    Revenue Recovered
                 </div>
                 <div class="card-value">
-                    {high_risk_count}
+                    ₹{amount_recovered:,.2f}
                 </div>
             </div>
             """,
@@ -289,6 +296,8 @@ if page == "Overview":
             """,
             unsafe_allow_html=True,
         )
+
+    
 
     # ---------- Risk & Revenue Intelligence ----------
 
@@ -534,22 +543,24 @@ elif page == "Failed Payments":
 # RECOVERY
 # ==========================================================
 
+# ==========================================================
+# RECOVERY
+# ==========================================================
+
 elif page == "Recovery":
 
     st.title("Recovery Activity")
 
     st.caption(
         "Create AI-assisted or deterministic recovery decisions "
-        "for failed payments."
+        "and record their outcomes."
     )
 
     # ------------------------------------------------------
-    # RECOVERY ACTION
+    # CREATE RECOVERY DECISION
     # ------------------------------------------------------
 
-    st.markdown(
-        "### Create Recovery Decision"
-    )
+    st.markdown("### Create Recovery Decision")
 
     try:
 
@@ -559,10 +570,12 @@ elif page == "Recovery":
         )
 
         if failed_response.status_code != 200:
+
             st.error(
                 f"Failed Payments API returned "
                 f"status {failed_response.status_code}."
             )
+
         else:
 
             failed_payments = failed_response.json()
@@ -599,9 +612,18 @@ elif page == "Recovery":
                             {selected_payment_id}
                         </div>
                         <div>
+                            Invoice:
+                            <strong>
+                                {selected_payment.get("invoice_id", "-")}
+                            </strong>
+                        </div>
+                        <div>
                             Failure Reason:
                             <strong>
-                                {selected_payment.get("failure_reason", "Unknown")}
+                                {selected_payment.get(
+                                    "failure_reason",
+                                    "Unknown"
+                                )}
                             </strong>
                         </div>
                     </div>
@@ -647,58 +669,15 @@ elif page == "Recovery":
 
                             result = response.json()
 
+                            # Keep the newly created recovery ID
+                            # available for the outcome section.
+                            st.session_state[
+                                "latest_recovery"
+                            ] = result
+
                             st.success(
                                 "Recovery decision created successfully."
                             )
-
-                            st.markdown(
-                                "### Recovery Decision"
-                            )
-
-                            col1, col2, col3 = st.columns(3)
-
-                            with col1:
-                                st.metric(
-                                    "Recovery ID",
-                                    result.get(
-                                        "recovery_id",
-                                        "-",
-                                    ),
-                                )
-
-                            with col2:
-                                st.metric(
-                                    "Strategy",
-                                    result.get(
-                                        "strategy",
-                                        "-",
-                                    ),
-                                )
-
-                            with col3:
-                                st.metric(
-                                    "Status",
-                                    result.get(
-                                        "status",
-                                        "-",
-                                    ).upper(),
-                                )
-
-                            st.markdown(
-                                "#### Decision Notes"
-                            )
-
-                            st.info(
-                                result.get(
-                                    "notes",
-                                    "No decision notes available.",
-                                )
-                            )
-
-                            with st.expander(
-                                "View API Response"
-                            ):
-                                st.json(result)
 
                         else:
 
@@ -716,14 +695,12 @@ elif page == "Recovery":
                                 f"{error_detail}"
                             )
 
-                    except requests.exceptions.RequestException as exc:
+                    except requests.exceptions.RequestException:
 
                         st.error(
                             "Unable to connect to the RazorPulse backend. "
                             "Make sure FastAPI is running on port 8000."
                         )
-
-                st.divider()
 
     except requests.exceptions.RequestException:
 
@@ -733,12 +710,209 @@ elif page == "Recovery":
         )
 
     # ------------------------------------------------------
+    # LATEST RECOVERY DECISION
+    # ------------------------------------------------------
+
+    latest_recovery = st.session_state.get(
+        "latest_recovery"
+    )
+
+    if latest_recovery:
+
+        st.divider()
+
+        st.markdown("### Recovery Decision")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Recovery ID",
+                latest_recovery.get(
+                    "recovery_id",
+                    "-",
+                ),
+            )
+
+        with col2:
+
+            st.metric(
+                "Strategy",
+                latest_recovery.get(
+                    "strategy",
+                    "-",
+                ),
+            )
+
+        with col3:
+
+            st.metric(
+                "Status",
+                latest_recovery.get(
+                    "status",
+                    "-",
+                ).upper(),
+            )
+
+        st.markdown("#### Decision Notes")
+
+        st.info(
+            latest_recovery.get(
+                "notes",
+                "No decision notes available.",
+            )
+        )
+
+        # --------------------------------------------------
+        # RECORD OUTCOME
+        # --------------------------------------------------
+
+        st.markdown("### Record Recovery Outcome")
+
+        outcome_status = st.selectbox(
+            "Outcome",
+            [
+                "completed",
+                "failed",
+                "manual_review",
+            ],
+        )
+
+        invoice_amount = float(
+            selected_payment.get(
+                "amount",
+                0,
+            )
+            or 0
+        )
+
+        amount_recovered = st.number_input(
+            "Amount Recovered",
+            min_value=0.0,
+            max_value=invoice_amount if invoice_amount > 0 else None,
+            value=0.0,
+            step=100.0,
+        )
+
+        outcome_notes = st.text_area(
+            "Outcome Notes",
+            placeholder=(
+                "Describe what happened during recovery..."
+            ),
+        )
+
+        if st.button(
+            "Save Recovery Outcome",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            recovery_id = latest_recovery.get(
+                "recovery_id"
+            )
+
+            try:
+
+                response = requests.post(
+                    f"{BACKEND_URL}/api/recovery/"
+                    f"{recovery_id}/outcome",
+                    params={
+                        "status": outcome_status,
+                        "amount_recovered": amount_recovered,
+                        "notes": outcome_notes,
+                    },
+                    timeout=10,
+                )
+
+                if response.status_code == 200:
+
+                    outcome = response.json()
+
+                    # Update the stored recovery information
+                    # so the UI reflects the latest state.
+                    st.session_state[
+                        "latest_recovery"
+                    ] = outcome
+
+                    st.success(
+                        "Recovery outcome recorded successfully."
+                    )
+
+                    st.markdown(
+                        "#### Recorded Outcome"
+                    )
+
+                    result_col1, result_col2, result_col3 = (
+                        st.columns(3)
+                    )
+
+                    with result_col1:
+
+                        st.metric(
+                            "Status",
+                            outcome.get(
+                                "status",
+                                "-",
+                            ).upper(),
+                        )
+
+                    with result_col2:
+
+                        st.metric(
+                            "Amount Recovered",
+                            f"₹{float(outcome.get('amount_recovered', 0) or 0):,.2f}",
+                        )
+
+                    with result_col3:
+
+                        st.metric(
+                            "Recovery ID",
+                            outcome.get(
+                                "recovery_id",
+                                "-",
+                            ),
+                        )
+
+                else:
+
+                    try:
+                        error_detail = response.json().get(
+                            "detail",
+                            response.text,
+                        )
+                    except ValueError:
+                        error_detail = response.text
+
+                    st.error(
+                        f"Outcome update failed "
+                        f"({response.status_code}): "
+                        f"{error_detail}"
+                    )
+
+            except requests.exceptions.RequestException:
+
+                st.error(
+                    "Unable to connect to the RazorPulse backend. "
+                    "Make sure FastAPI is running on port 8000."
+                )
+
+        with st.expander("View Latest API Response"):
+
+            st.json(
+                st.session_state.get(
+                    "latest_recovery",
+                    {},
+                )
+            )
+
+    # ------------------------------------------------------
     # RECOVERY HISTORY
     # ------------------------------------------------------
 
-    st.markdown(
-        "### Recovery History"
-    )
+    st.divider()
+
+    st.markdown("### Recovery History")
 
     try:
 
