@@ -1175,13 +1175,17 @@ elif page == "Risk Analysis":
 # AUDIT TRAIL
 # ==========================================================
 
+# ==========================================================
+# AUDIT TRAIL
+# ==========================================================
+
 elif page == "Audit Trail":
 
     st.title("Audit Trail")
 
     st.caption(
-        "Track RazorPulse decisions, recovery actions, "
-        "and system events."
+        "Track recovery decisions, AI recommendations, "
+        "guardrail decisions, and recovery outcomes."
     )
 
     try:
@@ -1197,65 +1201,214 @@ elif page == "Audit Trail":
 
             if logs:
 
-                df = pd.DataFrame(
-                    logs
+                df = pd.DataFrame(logs)
+
+                # --------------------------------------------------
+                # Summary metrics
+                # --------------------------------------------------
+
+                total_events = len(df)
+
+                recovery_decisions = len(
+                    df[
+                        df["event_type"].isin(
+                            [
+                                "RECOVERY_DECISION",
+                                "AI_RECOVERY_DECISION",
+                            ]
+                        )
+                    ]
                 )
 
-                col1, col2, col3 = st.columns(3)
+                recovery_outcomes = len(
+                    df[
+                        df["event_type"]
+                        == "RECOVERY_OUTCOME"
+                    ]
+                )
+
+                entities_tracked = df[
+                    "entity_id"
+                ].nunique()
+
+                col1, col2, col3, col4 = st.columns(4)
 
                 with col1:
-
                     st.metric(
                         "Total Events",
-                        len(df),
+                        total_events,
                     )
 
                 with col2:
-
-                    recovery_decisions = len(
-                        df[
-                            df["event_type"].isin(
-                                [
-                                    "RECOVERY_DECISION",
-                                    "AI_RECOVERY_DECISION",
-                                ]
-                            )
-                        ]
-                    )
-
                     st.metric(
                         "Recovery Decisions",
                         recovery_decisions,
                     )
 
                 with col3:
-
                     st.metric(
-                        "Entities Tracked",
-                        df["entity_id"].nunique(),
+                        "Recovery Outcomes",
+                        recovery_outcomes,
+                    )
+
+                with col4:
+                    st.metric(
+                        "Invoices Tracked",
+                        entities_tracked,
                     )
 
                 st.divider()
 
-                st.markdown(
-                    "### Recent Events"
+                # --------------------------------------------------
+                # Human-readable event labels
+                # --------------------------------------------------
+
+                event_labels = {
+                    "RECOVERY_DECISION": "Recovery Decision",
+                    "AI_RECOVERY_DECISION": "AI Recovery Decision",
+                    "RECOVERY_OUTCOME": "Recovery Outcome",
+                }
+
+                display_df = df.copy()
+
+                display_df["Event"] = (
+                    display_df["event_type"]
+                    .map(event_labels)
+                    .fillna(display_df["event_type"])
                 )
 
-                display_df = df.rename(
-                    columns={
-                        "created_at": "Time",
-                        "event_type": "Event",
-                        "entity_type": "Entity Type",
-                        "entity_id": "Entity ID",
-                        "message": "Message",
-                    }
+                display_df["Entity"] = (
+                    display_df["entity_type"]
+                    .astype(str)
+                    .str.title()
                 )
+
+                display_df["Details"] = (
+                    display_df["message"]
+                    .astype(str)
+                    .str.replace(
+                        "â‚¹",
+                        "₹",
+                        regex=False,
+                    )
+                )
+
+                display_df["Time"] = pd.to_datetime(
+                    display_df["created_at"],
+                    errors="coerce",
+                ).dt.strftime(
+                    "%d %b %Y, %H:%M"
+                )
+
+                display_df["Entity ID"] = (
+                    display_df["entity_id"]
+                )
+
+                # --------------------------------------------------
+                # Event filter
+                # --------------------------------------------------
+
+                st.markdown(
+                    "### Decision History"
+                )
+
+                filter_options = [
+                    "All Events",
+                    "Recovery Decisions",
+                    "AI Decisions",
+                    "Recovery Outcomes",
+                ]
+
+                selected_filter = st.selectbox(
+                    "Filter Events",
+                    filter_options,
+                )
+
+                filtered_df = display_df
+
+                if selected_filter == "Recovery Decisions":
+
+                    filtered_df = display_df[
+                        display_df["event_type"]
+                        == "RECOVERY_DECISION"
+                    ]
+
+                elif selected_filter == "AI Decisions":
+
+                    filtered_df = display_df[
+                        display_df["event_type"]
+                        == "AI_RECOVERY_DECISION"
+                    ]
+
+                elif selected_filter == "Recovery Outcomes":
+
+                    filtered_df = display_df[
+                        display_df["event_type"]
+                        == "RECOVERY_OUTCOME"
+                    ]
+
+                # --------------------------------------------------
+                # Main audit table
+                # --------------------------------------------------
+
+                audit_table = filtered_df[
+                    [
+                        "Time",
+                        "Event",
+                        "Entity",
+                        "Entity ID",
+                        "Details",
+                    ]
+                ]
 
                 st.dataframe(
-                    display_df,
+                    audit_table,
                     width="stretch",
                     hide_index=True,
                 )
+
+                # --------------------------------------------------
+                # Recovery lifecycle explanation
+                # --------------------------------------------------
+
+                st.markdown(
+                    "### RazorPulse Recovery Lifecycle"
+                )
+
+                st.info(
+                    "Payment failure → Risk analysis → "
+                    "AI recommendation → Deterministic guardrail → "
+                    "Recovery decision → Recovery outcome → Audit trail"
+                )
+
+                # --------------------------------------------------
+                # Latest recovery activity
+                # --------------------------------------------------
+
+                outcome_df = display_df[
+                    display_df["event_type"]
+                    == "RECOVERY_OUTCOME"
+                ]
+
+                if not outcome_df.empty:
+
+                    st.markdown(
+                        "### Latest Recovery Outcomes"
+                    )
+
+                    latest_outcomes = outcome_df[
+                        [
+                            "Time",
+                            "Entity ID",
+                            "Details",
+                        ]
+                    ].head(5)
+
+                    st.dataframe(
+                        latest_outcomes,
+                        width="stretch",
+                        hide_index=True,
+                    )
 
             else:
 
