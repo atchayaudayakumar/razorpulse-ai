@@ -525,6 +525,11 @@ elif page == "Failed Payments":
         )
 
 
+
+# ==========================================================
+# RECOVERY
+# ==========================================================
+
 # ==========================================================
 # RECOVERY
 # ==========================================================
@@ -534,7 +539,205 @@ elif page == "Recovery":
     st.title("Recovery Activity")
 
     st.caption(
-        "AI-assisted recovery strategies and recovery outcomes."
+        "Create AI-assisted or deterministic recovery decisions "
+        "for failed payments."
+    )
+
+    # ------------------------------------------------------
+    # RECOVERY ACTION
+    # ------------------------------------------------------
+
+    st.markdown(
+        "### Create Recovery Decision"
+    )
+
+    try:
+
+        failed_response = requests.get(
+            f"{BACKEND_URL}/api/failed-payments",
+            timeout=5,
+        )
+
+        if failed_response.status_code != 200:
+            st.error(
+                f"Failed Payments API returned "
+                f"status {failed_response.status_code}."
+            )
+        else:
+
+            failed_payments = failed_response.json()
+
+            if not failed_payments:
+
+                st.info(
+                    "No failed payments are available for recovery."
+                )
+
+            else:
+
+                payment_options = {
+                    payment["payment_id"]: payment
+                    for payment in failed_payments
+                }
+
+                selected_payment_id = st.selectbox(
+                    "Select Failed Payment",
+                    list(payment_options.keys()),
+                )
+
+                selected_payment = payment_options[
+                    selected_payment_id
+                ]
+
+                st.markdown(
+                    f"""
+                    <div class="card">
+                        <div class="card-label">
+                            Selected Payment
+                        </div>
+                        <div class="card-value">
+                            {selected_payment_id}
+                        </div>
+                        <div>
+                            Failure Reason:
+                            <strong>
+                                {selected_payment.get("failure_reason", "Unknown")}
+                            </strong>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.write("")
+
+                recovery_mode = st.radio(
+                    "Recovery Mode",
+                    [
+                        "Deterministic",
+                        "AI-Assisted",
+                    ],
+                    horizontal=True,
+                )
+
+                mode = (
+                    "ai"
+                    if recovery_mode == "AI-Assisted"
+                    else "deterministic"
+                )
+
+                if st.button(
+                    "Create Recovery",
+                    type="primary",
+                    use_container_width=True,
+                ):
+
+                    try:
+
+                        response = requests.post(
+                            f"{BACKEND_URL}/api/recovery/"
+                            f"{selected_payment_id}",
+                            json={
+                                "mode": mode,
+                            },
+                            timeout=30,
+                        )
+
+                        if response.status_code == 200:
+
+                            result = response.json()
+
+                            st.success(
+                                "Recovery decision created successfully."
+                            )
+
+                            st.markdown(
+                                "### Recovery Decision"
+                            )
+
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                st.metric(
+                                    "Recovery ID",
+                                    result.get(
+                                        "recovery_id",
+                                        "-",
+                                    ),
+                                )
+
+                            with col2:
+                                st.metric(
+                                    "Strategy",
+                                    result.get(
+                                        "strategy",
+                                        "-",
+                                    ),
+                                )
+
+                            with col3:
+                                st.metric(
+                                    "Status",
+                                    result.get(
+                                        "status",
+                                        "-",
+                                    ).upper(),
+                                )
+
+                            st.markdown(
+                                "#### Decision Notes"
+                            )
+
+                            st.info(
+                                result.get(
+                                    "notes",
+                                    "No decision notes available.",
+                                )
+                            )
+
+                            with st.expander(
+                                "View API Response"
+                            ):
+                                st.json(result)
+
+                        else:
+
+                            try:
+                                error_detail = response.json().get(
+                                    "detail",
+                                    response.text,
+                                )
+                            except ValueError:
+                                error_detail = response.text
+
+                            st.error(
+                                f"Recovery request failed "
+                                f"({response.status_code}): "
+                                f"{error_detail}"
+                            )
+
+                    except requests.exceptions.RequestException as exc:
+
+                        st.error(
+                            "Unable to connect to the RazorPulse backend. "
+                            "Make sure FastAPI is running on port 8000."
+                        )
+
+                st.divider()
+
+    except requests.exceptions.RequestException:
+
+        st.error(
+            "Unable to connect to the RazorPulse backend. "
+            "Make sure FastAPI is running on port 8000."
+        )
+
+    # ------------------------------------------------------
+    # RECOVERY HISTORY
+    # ------------------------------------------------------
+
+    st.markdown(
+        "### Recovery History"
     )
 
     try:
@@ -592,10 +795,6 @@ elif page == "Recovery":
 
                 st.divider()
 
-                st.markdown(
-                    "### Recovery Decisions"
-                )
-
                 display_df = df.rename(
                     columns={
                         "recovery_id": "Recovery ID",
@@ -635,7 +834,6 @@ elif page == "Recovery":
             "Unable to connect to the RazorPulse backend. "
             "Make sure FastAPI is running on port 8000."
         )
-
 
 # ==========================================================
 # RISK ANALYSIS

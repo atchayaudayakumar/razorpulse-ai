@@ -2,6 +2,8 @@ import hashlib
 import hmac
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel
+from typing import Literal
 from sqlalchemy.orm import Session
 
 from backend.config import (
@@ -16,9 +18,13 @@ from backend.models import (
     PaymentAttempt,
     RecoveryAttempt,
 )
+
 from backend.risk_service import calculate_payment_risk
-
-
+from backend.recovery_service import record_recovery_outcome
+from backend.recovery_service import (
+    create_ai_recovery_attempt,
+    create_recovery_attempt,
+)
 # Create all database tables defined in models.py
 Base.metadata.create_all(bind=engine)
 
@@ -30,7 +36,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
-
+class RecoveryRequest(BaseModel):
+    mode: Literal["deterministic", "ai"] = "deterministic"
 # ---------------------------------------------------------
 # Root
 # ---------------------------------------------------------
@@ -206,7 +213,135 @@ def get_recovery_attempts():
     finally:
         db.close()
 
+# ---------------------------------------------------------
+# Recovery Action API
+# ---------------------------------------------------------
 
+@app.post("/api/recovery/{payment_id}")
+def trigger_recovery(
+    payment_id: str,
+    recovery_request: RecoveryRequest,
+):
+    """
+    Trigger a controlled recovery decision for a failed payment.
+
+    AI mode allows Gemini to recommend a strategy, but the
+    deterministic recovery policy remains the final guardrail.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        payment = (
+            db.query(PaymentAttempt)
+            .filter(
+                PaymentAttempt.razorpay_payment_id == payment_id
+            )
+            .first()
+        )
+
+        if payment is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Payment attempt not found.",
+            )
+
+        if payment.status != "failed":
+            raise HTTPException(
+                status_code=400,
+                detail="Only failed payments can enter recovery.",
+            )
+
+        if recovery_request.mode == "ai":
+            recovery = create_ai_recovery_attempt(
+                db=db,
+                payment_attempt=payment,
+            )
+        else:
+            recovery = create_recovery_attempt(
+                db=db,
+                payment_attempt=payment,
+            )
+
+        return {
+            "recovery_id": recovery.id,
+            "payment_id": payment.razorpay_payment_id,
+            "invoice_id": recovery.invoice_id,
+            "mode": recovery_request.mode,
+            "strategy": recovery.strategy,
+            "status": recovery.status,
+            "amount_recovered": recovery.amount_recovered,
+            "notes": recovery.notes,
+        }
+
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# Recovery Outcome API
+# ---------------------------------------------------------
+
+@app.post("/api/recovery/{recovery_id}/outcome")
+def update_recovery_outcome(
+    recovery_id: int,
+    status: str,
+    amount_recovered: float = 0.0,
+    notes: str = "",
+):
+    """
+    Record the result of a recovery attempt.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        recovery = (
+            db.query(RecoveryAttempt)
+            .filter(RecoveryAttempt.id == recovery_id)
+            .first()
+        )
+
+        if recovery is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Recovery attempt not found.",
+            )
+
+        if status not in {
+            "completed",
+            "failed",
+            "manual_review",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid recovery status.",
+            )
+
+        if amount_recovered < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="amount_recovered cannot be negative.",
+            )
+
+        recovery = record_recovery_outcome(
+            db=db,
+            recovery_attempt=recovery,
+            status=status,
+            amount_recovered=amount_recovered,
+            notes=notes,
+        )
+
+        return {
+            "recovery_id": recovery.id,
+            "invoice_id": recovery.invoice_id,
+            "strategy": recovery.strategy,
+            "status": recovery.status,
+            "amount_recovered": recovery.amount_recovered,
+            "notes": recovery.notes,
+        }
+
+    finally:
+        db.close()
 # ---------------------------------------------------------
 # Risk Analysis API
 # ---------------------------------------------------------

@@ -60,10 +60,24 @@ Do not perform any payment action.
 Only provide analysis and a recommendation.
 """
 
-    interaction = client.interactions.create(
-        model="gemini-3.6-flash",
-        input=prompt,
-    )
+    
+    try:
+        interaction = client.interactions.create(
+            model="gemini-3.6-flash",
+            input=prompt,
+        )
+
+        text = interaction.output_text.strip()
+
+    except Exception as exc:
+        return AIRecoveryRecommendation(
+            recommendation="manual_review",
+            explanation=(
+                "AI analysis was unavailable. "
+                "Manual review is required."
+            ),
+            confidence=0.0,
+        )
 
     text = interaction.output_text.strip()
 
