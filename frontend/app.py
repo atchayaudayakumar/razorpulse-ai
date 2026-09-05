@@ -2872,6 +2872,12 @@ def recovery_page():
 
         result = st.session_state.last_recovery_result
 
+        recovery_id = first_value(
+            result,
+            "recovery_id",
+            "id",
+            default=None,
+        )
         strategy = first_value(
             result,
             "strategy",
@@ -2999,12 +3005,35 @@ def recovery_page():
                 st.session_state.last_recovery_mode
                 or mode,
             )
-
         with result_cols[2]:
             st.metric(
                 "Recovered",
                 money(amount_recovered),
             )
+
+            if str(status).lower() == "planned" and recovery_id is not None:
+              if st.button(
+                "Execute Recovery",
+                type="primary",
+                use_container_width=True,
+                key="execute_recovery",
+            ):
+                outcome = api_post(
+                    f"/api/recovery/{recovery_id}/outcome"
+                    f"?status=completed"
+                    f"&amount_recovered={amount}"
+                    f"&notes=Controlled test-mode recovery completed.",
+                    {},
+                )
+
+                if outcome is not None:
+                    st.session_state.last_recovery_result = {
+                        **result,
+                        **outcome,
+                    }
+                    st.success("Recovery executed successfully.")
+                    st.rerun()
+        
 
     # ------------------------------------------------------
     # ACTIVITY

@@ -38,3 +38,5 @@ reports/*.csv
 # Temporary files
 *.tmp
 *.temp
+*.zip
+frontend/app_backup_before_conflict.py
