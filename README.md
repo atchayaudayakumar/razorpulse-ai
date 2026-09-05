@@ -37,7 +37,49 @@ FastAPI Backend
           └── Invoices
               Recovery Attempts
               Audit Records
+
 ```
+                    ┌──────────────────────┐
+                    │      RazorPulse      │
+                    │        User          │
+                    └──────────┬───────────┘
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │ Streamlit Dashboard  │
+                    │    frontend/app.py    │
+                    └──────────┬───────────┘
+                               │ HTTP
+                               ▼
+                    ┌──────────────────────┐
+                    │   FastAPI Backend    │
+                    │      main.py         │
+                    └──────────┬───────────┘
+                               │
+             ┌─────────────────┼─────────────────┐
+             ▼                 ▼                 ▼
+      ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+      │  Risk Engine │  │Recovery Engine│ │  AI Service  │
+      └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+             │                 │                 │
+             └─────────────────┼─────────────────┘
+                               ▼
+                    ┌──────────────────────┐
+                    │ Recovery / Payment  │
+                    │      Services       │
+                    └──────────┬───────────┘
+                               ▼
+                    ┌──────────────────────┐
+                    │    SQLite Database  │
+                    │                      │
+                    │ Invoices             │
+                    │ Recovery Attempts    │
+                    │ Audit Records        │
+                    └──────────────────────┘
+
+  ![Razorpulse architecture ](image.png)
+
+  ![alt text](dashboard.png)
 
 ### 🛠️ Tech Stack
 
