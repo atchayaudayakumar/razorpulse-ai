@@ -14,46 +14,62 @@ from backend.config import (
 from backend.database import Base, SessionLocal, engine
 from backend.models import (
     AuditLog,
+    Customer,
     Invoice,
     PaymentAttempt,
     RecoveryAttempt,
 )
-
 from backend.risk_service import calculate_payment_risk
-from backend.recovery_service import record_recovery_outcome
+from backend.ai_service import analyze_payment_failure
 from backend.recovery_service import (
     create_ai_recovery_attempt,
     create_recovery_attempt,
+    record_recovery_outcome,
 )
-# Create all database tables defined in models.py
+
+
+# ==========================================================
+# DATABASE INITIALIZATION
+# ==========================================================
+
 Base.metadata.create_all(bind=engine)
 
 
-# Create the FastAPI application
+# ==========================================================
+# FASTAPI APPLICATION
+# ==========================================================
+
 app = FastAPI(
     title=APP_NAME,
     description="AI-powered revenue recovery agent",
     version="0.1.0",
 )
 
+
+# ==========================================================
+# REQUEST MODELS
+# ==========================================================
+
 class RecoveryRequest(BaseModel):
     mode: Literal["deterministic", "ai"] = "deterministic"
-# ---------------------------------------------------------
-# Root
-# ---------------------------------------------------------
+
+class AIInsightsRequest(BaseModel):
+    customer_name: str
+    invoice_amount: float
+    failure_reason: str
+    risk_level: str
+# ==========================================================
+# BASIC ENDPOINTS
+# ==========================================================
 
 @app.get("/")
 def root():
     return {
         "app": APP_NAME,
         "environment": APP_ENV,
-        "status": "running",
+        "running": True,
     }
 
-
-# ---------------------------------------------------------
-# Health
-# ---------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -62,39 +78,46 @@ def health():
     }
 
 
-# ---------------------------------------------------------
-# Razorpay Webhook
-# ---------------------------------------------------------
+# ==========================================================
+# RAZORPAY WEBHOOK
+# ==========================================================
+
 @app.post("/webhooks/razorpay")
 async def razorpay_webhook(
     request: Request,
-    x_razorpay_signature: str = Header(default=""),
+    x_razorpay_signature: str | None = Header(default=None),
 ):
-    """
-    Receive and verify Razorpay webhook events.
-    """
-
     body = await request.body()
 
+    # Webhook secret must be configured.
     if not RAZORPAY_WEBHOOK_SECRET:
         raise HTTPException(
             status_code=500,
-            detail="Razorpay webhook secret is not configured.",
+            detail="Razorpay webhook secret is not configured",
         )
 
+    # Signature is mandatory.
+    if not x_razorpay_signature:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Razorpay signature",
+        )
+
+    # Calculate expected Razorpay signature.
     expected_signature = hmac.new(
         RAZORPAY_WEBHOOK_SECRET.encode(),
         body,
         hashlib.sha256,
     ).hexdigest()
 
+    # Secure signature comparison.
     if not hmac.compare_digest(
         expected_signature,
         x_razorpay_signature,
     ):
         raise HTTPException(
             status_code=400,
-            detail="Invalid webhook signature.",
+            detail="Invalid Razorpay signature",
         )
 
     payload = await request.json()
@@ -106,8 +129,8 @@ async def razorpay_webhook(
         .get("entity", {})
     )
 
-    payment_id = payment_entity.get("id")
-    order_id = payment_entity.get("order_id")
+    razorpay_order_id = payment_entity.get("order_id")
+    razorpay_payment_id = payment_entity.get("id")
 
     db = SessionLocal()
 
@@ -115,84 +138,102 @@ async def razorpay_webhook(
         invoice = (
             db.query(Invoice)
             .filter(
-                Invoice.razorpay_order_id == order_id
+                Invoice.razorpay_order_id
+                == razorpay_order_id
             )
             .first()
         )
 
-        if invoice is None:
+        if not invoice:
             raise HTTPException(
                 status_code=404,
-                detail="Invoice not found for Razorpay order.",
+                detail="Invoice not found for Razorpay order",
             )
 
+        # The test and existing API contract expect
+        # the numeric database invoice ID here.
         return {
             "status": "processed",
-            "payment_id": payment_id,
+            "payment_id": razorpay_payment_id,
             "invoice_id": invoice.id,
         }
 
     finally:
         db.close()
-# ---------------------------------------------------------
-# Failed Payments API
-# ---------------------------------------------------------
+
+
+# ==========================================================
+# FAILED PAYMENTS
+# ==========================================================
 
 @app.get("/api/failed-payments")
 def get_failed_payments():
-    """
-    Return failed payment attempts from the database.
-    """
-
-    db: Session = SessionLocal()
+    db = SessionLocal()
 
     try:
-        payments = (
-            db.query(PaymentAttempt)
-            .filter(PaymentAttempt.status == "failed")
-            .order_by(PaymentAttempt.attempted_at.desc())
+        results = (
+            db.query(
+                PaymentAttempt,
+                Invoice,
+                Customer,
+            )
+            .join(
+                Invoice,
+                PaymentAttempt.invoice_id == Invoice.id,
+            )
+            .join(
+                Customer,
+                Invoice.customer_id == Customer.id,
+            )
+            .filter(
+                PaymentAttempt.status == "failed"
+            )
+            .order_by(
+                PaymentAttempt.attempted_at.desc()
+            )
             .all()
         )
 
-        results = []
-
-        for payment in payments:
-            results.append(
-                {
-                    "payment_id": payment.razorpay_payment_id,
-                    "invoice_id": payment.invoice_id,
-                    "status": payment.status,
-                    "failure_reason": payment.failure_reason,
-                    "attempted_at": payment.attempted_at,
-                }
-            )
-
-        return results
+        return [
+            {
+                "payment_id": payment.razorpay_payment_id,
+                "invoice_id": invoice.invoice_id,
+                "customer": customer.name,
+                "amount": invoice.amount,
+                "currency": invoice.currency,
+                "status": payment.status,
+                "failure_reason": payment.failure_reason,
+                "failed_at": payment.attempted_at,
+            }
+            for payment, invoice, customer in results
+        ]
 
     finally:
         db.close()
 
 
-# ---------------------------------------------------------
-# Recovery Attempts API
-# ---------------------------------------------------------
+# ==========================================================
+# RECOVERY ATTEMPTS
+# ==========================================================
 
 @app.get("/api/recovery-attempts")
 def get_recovery_attempts():
-    """
-    Return recovery attempts together with invoice information.
-    """
-
-    db: Session = SessionLocal()
+    db = SessionLocal()
 
     try:
-        attempts = (
-            db.query(RecoveryAttempt, Invoice)
+        results = (
+            db.query(
+                RecoveryAttempt,
+                Invoice,
+            )
             .join(
                 Invoice,
-                RecoveryAttempt.invoice_id == Invoice.id,
+                RecoveryAttempt.invoice_id
+                == Invoice.id,
             )
-            .order_by(RecoveryAttempt.id.desc())
+            .order_by(
+                RecoveryAttempt.created_at.desc()
+            )
             .all()
         )
 
@@ -207,66 +248,82 @@ def get_recovery_attempts():
                 "amount_recovered": recovery.amount_recovered,
                 "notes": recovery.notes,
             }
-            for recovery, invoice in attempts
+            for recovery, invoice in results
         ]
 
     finally:
         db.close()
 
-# ---------------------------------------------------------
-# Recovery Action API
-# ---------------------------------------------------------
+
+# ==========================================================
+# CREATE RECOVERY ATTEMPT
+# ==========================================================
 
 @app.post("/api/recovery/{payment_id}")
-def trigger_recovery(
+def create_recovery(
     payment_id: str,
     recovery_request: RecoveryRequest,
 ):
-    """
-    Trigger a controlled recovery decision for a failed payment.
-
-    AI mode allows Gemini to recommend a strategy, but the
-    deterministic recovery policy remains the final guardrail.
-    """
-
-    db: Session = SessionLocal()
+    db = SessionLocal()
 
     try:
         payment = (
             db.query(PaymentAttempt)
             .filter(
-                PaymentAttempt.razorpay_payment_id == payment_id
+                PaymentAttempt.razorpay_payment_id
+                == payment_id
             )
             .first()
         )
 
-        if payment is None:
+        # Exact contract expected by tests.
+        if not payment:
             raise HTTPException(
                 status_code=404,
                 detail="Payment attempt not found.",
             )
 
+        # Only failed payments can enter recovery.
         if payment.status != "failed":
             raise HTTPException(
                 status_code=400,
                 detail="Only failed payments can enter recovery.",
             )
 
+        # Select recovery engine.
         if recovery_request.mode == "ai":
             recovery = create_ai_recovery_attempt(
-                db=db,
-                payment_attempt=payment,
+                db,
+                payment,
             )
         else:
             recovery = create_recovery_attempt(
-                db=db,
-                payment_attempt=payment,
+                db,
+                payment,
             )
+
+        invoice = (
+            db.query(Invoice)
+            .filter(
+                Invoice.id == payment.invoice_id
+            )
+            .first()
+        )
+
+        if not invoice:
+            raise HTTPException(
+                status_code=404,
+                detail="Invoice not found",
+            )
+
+        # The recovery service already commits its
+        # RecoveryAttempt. We refresh here for safety.
+        db.refresh(recovery)
 
         return {
             "recovery_id": recovery.id,
             "payment_id": payment.razorpay_payment_id,
-            "invoice_id": recovery.invoice_id,
+            "invoice_id": invoice.invoice_id,
             "mode": recovery_request.mode,
             "strategy": recovery.strategy,
             "status": recovery.status,
@@ -274,12 +331,24 @@ def trigger_recovery(
             "notes": recovery.notes,
         }
 
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
     finally:
         db.close()
 
-# ---------------------------------------------------------
-# Recovery Outcome API
-# ---------------------------------------------------------
+
+# ==========================================================
+# UPDATE RECOVERY OUTCOME
+# ==========================================================
 
 @app.post("/api/recovery/{recovery_id}/outcome")
 def update_recovery_outcome(
@@ -288,42 +357,48 @@ def update_recovery_outcome(
     amount_recovered: float = 0.0,
     notes: str = "",
 ):
-    """
-    Record the result of a recovery attempt.
-    """
+    # Validate status before touching the database.
+    valid_statuses = {
+        "completed",
+        "failed",
+        "manual_review",
+    }
 
-    db: Session = SessionLocal()
+    if status not in valid_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid recovery status.",
+        )
+
+    # Validate amount before touching the database.
+    if amount_recovered < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="amount_recovered cannot be negative.",
+        )
+
+    db = SessionLocal()
 
     try:
         recovery = (
             db.query(RecoveryAttempt)
-            .filter(RecoveryAttempt.id == recovery_id)
+            .filter(
+                RecoveryAttempt.id == recovery_id
+            )
             .first()
         )
 
-        if recovery is None:
+        # Exact contract expected by tests.
+        if not recovery:
             raise HTTPException(
                 status_code=404,
                 detail="Recovery attempt not found.",
             )
 
-        if status not in {
-            "completed",
-            "failed",
-            "manual_review",
-        }:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid recovery status.",
-            )
-
-        if amount_recovered < 0:
-            raise HTTPException(
-                status_code=400,
-                detail="amount_recovered cannot be negative.",
-            )
-
-        recovery = record_recovery_outcome(
+        # IMPORTANT:
+        # record_recovery_outcome() expects the
+        # RecoveryAttempt object, not recovery_id.
+        updated_recovery = record_recovery_outcome(
             db=db,
             recovery_attempt=recovery,
             status=status,
@@ -332,48 +407,71 @@ def update_recovery_outcome(
         )
 
         return {
-            "recovery_id": recovery.id,
-            "invoice_id": recovery.invoice_id,
-            "strategy": recovery.strategy,
-            "status": recovery.status,
-            "amount_recovered": recovery.amount_recovered,
-            "notes": recovery.notes,
+            "recovery_id": updated_recovery.id,
+            "status": updated_recovery.status,
+            "amount_recovered": updated_recovery.amount_recovered,
+            "notes": updated_recovery.notes,
         }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
     finally:
         db.close()
-# ---------------------------------------------------------
-# Risk Analysis API
-# ---------------------------------------------------------
+
+
+# ==========================================================
+# RISK ANALYSIS
+# ==========================================================
 
 @app.get("/api/risk-analysis")
 def get_risk_analysis():
-    """
-    Calculate revenue risk for every payment attempt
-    using the existing risk service and risk engine.
-    """
-
-    db: Session = SessionLocal()
+    db = SessionLocal()
 
     try:
-        payments = (
-            db.query(PaymentAttempt)
-            .order_by(PaymentAttempt.attempted_at.desc())
+        results = (
+            db.query(
+                PaymentAttempt,
+                Invoice,
+            )
+            .join(
+                Invoice,
+                PaymentAttempt.invoice_id
+                == Invoice.id,
+            )
+            .order_by(
+                PaymentAttempt.attempted_at.desc()
+            )
             .all()
         )
 
-        results = []
+        response = []
 
-        for payment in payments:
+        for payment, invoice in results:
             risk = calculate_payment_risk(
                 db,
                 payment,
             )
 
-            results.append(
+            response.append(
                 {
                     "payment_id": payment.razorpay_payment_id,
-                    "invoice_id": payment.invoice_id,
+                    "invoice_id": invoice.invoice_id,
                     "risk_score": risk.risk_score,
                     "risk_level": risk.risk_level,
                     "revenue_at_risk": risk.revenue_at_risk,
@@ -381,30 +479,59 @@ def get_risk_analysis():
                 }
             )
 
-        return results
-
+        return response
 
     finally:
         db.close()
 
+# ==========================================================
+# AI INSIGHTS
+# ==========================================================
 
+@app.post("/api/ai-insights")
+def get_ai_insights(
+    request: AIInsightsRequest,
+):
+    try:
+        result = analyze_payment_failure(
+            customer_name=request.customer_name,
+            invoice_amount=request.invoice_amount,
+            failure_reason=request.failure_reason,
+            risk_level=request.risk_level,
+        )
 
-# ---------------------------------------------------------
-# Audit Trail API
-# ---------------------------------------------------------
+        return {
+            "recommendation": result.recommendation,
+            "explanation": result.explanation,
+            "confidence": result.confidence,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI analysis failed: {exc}",
+        )
+
+# ==========================================================
+# AUDIT LOGS
+# ==========================================================
 
 @app.get("/api/audit-logs")
 def get_audit_logs():
-    """
-    Return audit logs ordered from newest to oldest.
-    """
-
-    db: Session = SessionLocal()
+    db = SessionLocal()
 
     try:
         logs = (
             db.query(AuditLog)
-            .order_by(AuditLog.created_at.desc())
+            .order_by(
+                AuditLog.created_at.desc()
+            )
             .all()
         )
 
@@ -421,4 +548,4 @@ def get_audit_logs():
         ]
 
     finally:
-         db.close()
+        db.close()
